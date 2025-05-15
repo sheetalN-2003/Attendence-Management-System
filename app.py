@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 
-# Constants
-TOLERANCE = 0.6
+# Constants (using uppercase naming convention)
+TOLERANCE = 0.6  # Default value that can be modified via session state
 KNOWN_FACES_DIR = 'known_faces'
 ATTENDANCE_DB = 'attendance.db'
 FRAME_THICKNESS = 2
@@ -39,7 +39,7 @@ def init_db():
 
 init_db()
 
-# Simplified face recognition using OpenCV (no DeepFace)
+# Face recognition functions using OpenCV
 def register_new_face(name, image_array):
     """Register a new face using basic OpenCV features"""
     conn = sqlite3.connect(ATTENDANCE_DB)
@@ -76,6 +76,9 @@ def recognize_face(image_array):
     # Convert input to grayscale
     gray_input = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
     
+    # Get current tolerance from session state or use default
+    current_tolerance = st.session_state.get('tolerance', TOLERANCE)
+    
     # Compare with all registered faces
     for face_file in os.listdir(KNOWN_FACES_DIR):
         if face_file.endswith('.jpg'):
@@ -83,15 +86,21 @@ def recognize_face(image_array):
             face_path = os.path.join(KNOWN_FACES_DIR, face_file)
             registered_face = cv2.imread(face_path, cv2.IMREAD_GRAYSCALE)
             
+            if registered_face is None:
+                continue
+                
             # Resize to same dimensions
-            registered_face = cv2.resize(registered_face, (gray_input.shape[1], gray_input.shape[0]))
-            
-            # Simple template matching
-            result = cv2.matchTemplate(gray_input, registered_face, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(result)
-            
-            if max_val > TOLERANCE:
-                recognized_names.append(name)
+            try:
+                registered_face = cv2.resize(registered_face, (gray_input.shape[1], gray_input.shape[0]))
+                
+                # Simple template matching
+                result = cv2.matchTemplate(gray_input, registered_face, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                
+                if max_val > current_tolerance:
+                    recognized_names.append(name)
+            except:
+                continue
     
     return recognized_names
 
@@ -138,6 +147,10 @@ def get_attendance_stats():
 # Streamlit UI
 st.set_page_config(page_title="Attendance System", layout="wide")
 st.title("Attendance Management System")
+
+# Initialize session state for tolerance
+if 'tolerance' not in st.session_state:
+    st.session_state.tolerance = TOLERANCE
 
 # Sidebar for navigation
 menu = st.sidebar.selectbox("Menu", ["Home", "Register New Face", "Attendance Records", "Analytics", "Settings"])
@@ -246,11 +259,10 @@ elif menu == "Settings":
     
     st.subheader("Recognition Parameters")
     new_tolerance = st.slider("Recognition Threshold (higher is stricter)", 
-                            0.0, 1.0, TOLERANCE, 0.05)
+                            0.0, 1.0, st.session_state.tolerance, 0.05)
     
     if st.button("Save Settings"):
-        global TOLERANCE
-        TOLERANCE = new_tolerance
+        st.session_state.tolerance = new_tolerance
         st.success("Settings saved!")
     
     st.subheader("System Maintenance")
