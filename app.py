@@ -2,7 +2,6 @@ import os
 import cv2
 import numpy as np
 import pandas as pd
-import face_recognition
 from datetime import datetime
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
@@ -15,6 +14,7 @@ from PIL import Image
 import threading
 import queue
 import av
+from deepface import DeepFace  # Alternative to face-recognition
 
 # Constants
 KNOWN_FACES_DIR = 'known_faces'
@@ -23,7 +23,6 @@ ENCODINGS_FILE = 'face_encodings.pkl'
 TOLERANCE = 0.6
 FRAME_THICKNESS = 2
 FONT_THICKNESS = 1
-MODEL = 'hog'  # or 'cnn' for better accuracy but slower performance
 
 # Create necessary directories and files
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
@@ -47,20 +46,7 @@ def init_db():
 
 init_db()
 
-# Load or create face encodings
-def load_face_encodings():
-    if os.path.exists(ENCODINGS_FILE):
-        with open(ENCODINGS_FILE, 'rb') as f:
-            return pickle.load(f)
-    return {'names': [], 'encodings': []}
-
-def save_face_encodings(data):
-    with open(ENCODINGS_FILE, 'wb') as f:
-        pickle.dump(data, f)
-
-face_data = load_face_encodings()
-
-# Face recognition functions
+# Face recognition functions using DeepFace
 def register_new_face(name, image_array):
     # Check if name already exists
     conn = sqlite3.connect(ATTENDANCE_DB)
@@ -70,54 +56,70 @@ def register_new_face(name, image_array):
         conn.close()
         return False
     
-    # Encode the face
-    face_locations = face_recognition.face_locations(image_array, model=MODEL)
-    if not face_locations:
+    # Save the image temporarily
+    temp_path = os.path.join(KNOWN_FACES_DIR, f"temp_{name}.jpg")
+    cv2.imwrite(temp_path, cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR))
+    
+    try:
+        # Get face embedding using DeepFace
+        embedding = DeepFace.represent(temp_path, model_name='Facenet')[0]["embedding"]
+        
+        # Save to database
+        now = datetime.now()
+        c.execute("INSERT INTO registered_faces (name, registration_date) VALUES (?, ?)", 
+                  (name, now))
+        conn.commit()
+        
+        # Save the image for reference
+        final_path = os.path.join(KNOWN_FACES_DIR, f"{name}.jpg")
+        os.rename(temp_path, final_path)
+        
+        return True
+    except Exception as e:
+        st.error(f"Face registration failed: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         return False
-    
-    face_encoding = face_recognition.face_encodings(image_array, face_locations)[0]
-    
-    # Update face data
-    face_data['names'].append(name)
-    face_data['encodings'].append(face_encoding)
-    save_face_encodings(face_data)
-    
-    # Save to database
-    now = datetime.now()
-    c.execute("INSERT INTO registered_faces (name, registration_date) VALUES (?, ?)", 
-              (name, now))
-    conn.commit()
-    conn.close()
-    
-    # Save the image for reference
-    cv2.imwrite(os.path.join(KNOWN_FACES_DIR, f"{name}.jpg"), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR))
-    
-    return True
+    finally:
+        conn.close()
 
 def recognize_face(frame):
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = small_frame[:, :, ::-1]
+    temp_path = os.path.join(KNOWN_FACES_DIR, "temp_frame.jpg")
+    cv2.imwrite(temp_path, frame)
     
-    face_locations = face_recognition.face_locations(rgb_small_frame, model=MODEL)
-    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
-    
-    recognized_names = []
-    
-    for face_encoding in face_encodings:
-        matches = face_recognition.compare_faces(face_data['encodings'], face_encoding, TOLERANCE)
-        name = "Unknown"
+    try:
+        # Find similar faces in the database
+        dfs = DeepFace.find(
+            img_path=temp_path,
+            db_path=KNOWN_FACES_DIR,
+            model_name='Facenet',
+            enforce_detection=False,
+            silent=True
+        )
         
-        if True in matches:
-            first_match_index = matches.index(True)
-            name = face_data['names'][first_match_index]
+        recognized_names = []
+        face_locations = []
         
-        recognized_names.append(name)
-    
-    # Scale back up face locations
-    face_locations = [(top * 4, right * 4, bottom * 4, left * 4) 
-                      for (top, right, bottom, left) in face_locations]
-    
-    return face_locations, recognized_names
+        if isinstance(dfs, list) and len(dfs) > 0:
+            df = dfs[0]
+            if len(df) > 0:
+                for _, row in df.iterrows():
+                    recognized_names.append(row['identity'].split('/')[-1].split('.')[0])
+                    # Create dummy face locations (DeepFace doesn't provide exact locations)
+                    face_locations.append((
+                        int(row['source_y']),
+                        int(row['source_x'] + row['source_w']),
+                        int(row['source_y'] + row['source_h']),
+                        int(row['source_x'])
+                    ))
+        
+        return face_locations, recognized_names
+    except Exception as e:
+        st.error(f"Face recognition error: {str(e)}")
+        return [], []
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def mark_attendance(name):
     conn = sqlite3.connect(ATTENDANCE_DB)
@@ -133,7 +135,7 @@ def mark_attendance(name):
         conn.commit()
     conn.close()
 
-# Database functions
+# Database functions (unchanged)
 def get_attendance_data():
     conn = sqlite3.connect(ATTENDANCE_DB)
     df = pd.read_sql("SELECT * FROM attendance ORDER BY timestamp DESC", conn)
@@ -148,12 +150,10 @@ def get_registered_faces():
 
 def get_attendance_stats():
     conn = sqlite3.connect(ATTENDANCE_DB)
-    # Daily stats
     daily_stats = pd.read_sql('''SELECT date, COUNT(*) as count 
                                  FROM attendance 
                                  GROUP BY date 
                                  ORDER BY date''', conn)
-    # Person stats
     person_stats = pd.read_sql('''SELECT name, COUNT(*) as count 
                                   FROM attendance 
                                   GROUP BY name 
@@ -161,7 +161,7 @@ def get_attendance_stats():
     conn.close()
     return daily_stats, person_stats
 
-# Video transformer for real-time processing
+# Video transformer using DeepFace
 class FaceRecognitionTransformer(VideoTransformerBase):
     def __init__(self):
         self.attendance_log = queue.Queue()
@@ -190,7 +190,7 @@ class FaceRecognitionTransformer(VideoTransformerBase):
         
         return img
 
-# Streamlit UI
+# Streamlit UI (unchanged except for removed model selection)
 st.set_page_config(page_title="Attendance System", layout="wide")
 st.title("Advanced Attendance Management System with Face Recognition")
 
@@ -229,9 +229,11 @@ if menu == "Home":
         st.subheader("Quick Stats")
         daily_stats, person_stats = get_attendance_stats()
         
-        st.metric("Total Registered Faces", len(face_data['names']))
-        st.metric("Today's Attendance", 
-                  len(get_attendance_data()[get_attendance_data()['date'] == datetime.now().date().isoformat()]))
+        registered_faces = get_registered_faces()
+        st.metric("Total Registered Faces", len(registered_faces))
+        
+        today_attendance = len(get_attendance_data()[get_attendance_data()['date'] == datetime.now().date().isoformat()])
+        st.metric("Today's Attendance", today_attendance)
         
         st.write("### Top Attendees")
         st.table(person_stats.head(5))
@@ -251,9 +253,8 @@ elif menu == "Register New Face":
         if st.button("Register Face"):
             if register_new_face(name, image_array):
                 st.success(f"Face registered successfully for {name}!")
-                face_data = load_face_encodings()  # Reload data
             else:
-                st.error("Failed to detect a face in the image. Please try another photo.")
+                st.error("Registration failed. Please try another photo.")
 
 elif menu == "Attendance Records":
     st.header("Attendance Records")
@@ -261,7 +262,6 @@ elif menu == "Attendance Records":
     df = get_attendance_data()
     st.dataframe(df)
     
-    # Filter options
     st.subheader("Filter Records")
     col1, col2 = st.columns(2)
     
@@ -278,7 +278,6 @@ elif menu == "Attendance Records":
     
     st.dataframe(df)
     
-    # Export options
     st.subheader("Export Data")
     export_format = st.selectbox("Select format", ["CSV", "Excel"])
     if st.button("Export"):
@@ -345,21 +344,12 @@ elif menu == "Settings":
     new_tolerance = st.slider("Recognition Tolerance (lower is stricter)", 
                               0.0, 1.0, TOLERANCE, 0.05)
     
-    model_choice = st.radio("Face Detection Model", 
-                            ["HOG (faster, less accurate)", "CNN (slower, more accurate)"], 
-                            index=0 if MODEL == 'hog' else 1)
-    
     if st.button("Save Settings"):
-        global TOLERANCE, MODEL
+        global TOLERANCE
         TOLERANCE = new_tolerance
-        MODEL = 'hog' if model_choice.startswith("HOG") else 'cnn'
         st.success("Settings saved!")
     
     st.subheader("System Maintenance")
-    if st.button("Rebuild Face Encodings"):
-        # This would involve scanning the known_faces directory and recreating encodings
-        st.warning("This feature would scan all images and rebuild encodings. Not implemented in this demo.")
-    
     if st.button("Clear All Data (Danger!)"):
         st.error("This will delete all attendance records and face data. Proceed with caution!")
         if st.checkbox("I understand this cannot be undone"):
@@ -371,11 +361,10 @@ elif menu == "Settings":
                 conn.commit()
                 conn.close()
                 
-                os.remove(ENCODINGS_FILE)
                 for file in os.listdir(KNOWN_FACES_DIR):
-                    os.remove(os.path.join(KNOWN_FACES_DIR, file))
+                    if file.endswith('.jpg'):
+                        os.remove(os.path.join(KNOWN_FACES_DIR, file))
                 
-                face_data = {'names': [], 'encodings': []}
                 st.warning("All data has been deleted!")
 
 st.markdown("""
