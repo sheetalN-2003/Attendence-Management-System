@@ -4,25 +4,20 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import sqlite3
 import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
-import threading
-import queue
-import av
-from deepface import DeepFace
 
-# Constants (now using uppercase naming convention)
-TOLERANCE = 0.6  # Moved to top level and made constant
-FRAME_THICKNESS = 2
-FONT_THICKNESS = 1
+# Constants
+TOLERANCE = 0.6
 KNOWN_FACES_DIR = 'known_faces'
 ATTENDANCE_DB = 'attendance.db'
+FRAME_THICKNESS = 2
+FONT_THICKNESS = 1
 
-# Create necessary directories and files
+# Create necessary directories
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 
 # Initialize database
@@ -44,9 +39,9 @@ def init_db():
 
 init_db()
 
-# Face recognition functions using DeepFace
+# Simplified face recognition using OpenCV (no DeepFace)
 def register_new_face(name, image_array):
-    """Register a new face using DeepFace"""
+    """Register a new face using basic OpenCV features"""
     conn = sqlite3.connect(ATTENDANCE_DB)
     c = conn.cursor()
     c.execute("SELECT name FROM registered_faces WHERE name=?", (name,))
@@ -54,63 +49,51 @@ def register_new_face(name, image_array):
         conn.close()
         return False
     
-    temp_path = os.path.join(KNOWN_FACES_DIR, f"temp_{name}.jpg")
-    cv2.imwrite(temp_path, cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR))
-    
     try:
-        embedding = DeepFace.represent(temp_path, model_name='Facenet')[0]["embedding"]
+        # Convert to grayscale (simplest possible feature extraction)
+        gray = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
+        
+        # Save the image
+        face_path = os.path.join(KNOWN_FACES_DIR, f"{name}.jpg")
+        cv2.imwrite(face_path, gray)
+        
+        # Save to database
         now = datetime.now()
         c.execute("INSERT INTO registered_faces (name, registration_date) VALUES (?, ?)", 
                   (name, now))
         conn.commit()
-        
-        final_path = os.path.join(KNOWN_FACES_DIR, f"{name}.jpg")
-        os.rename(temp_path, final_path)
         return True
     except Exception as e:
         st.error(f"Face registration failed: {str(e)}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
         return False
     finally:
         conn.close()
 
-def recognize_face(frame):
-    """Recognize faces in frame using DeepFace"""
-    temp_path = os.path.join(KNOWN_FACES_DIR, "temp_frame.jpg")
-    cv2.imwrite(temp_path, frame)
+def recognize_face(image_array):
+    """Simplified face recognition using template matching"""
+    recognized_names = []
     
-    try:
-        dfs = DeepFace.find(
-            img_path=temp_path,
-            db_path=KNOWN_FACES_DIR,
-            model_name='Facenet',
-            enforce_detection=False,
-            silent=True
-        )
-        
-        recognized_names = []
-        face_locations = []
-        
-        if isinstance(dfs, list) and len(dfs) > 0:
-            df = dfs[0]
-            if len(df) > 0:
-                for _, row in df.iterrows():
-                    recognized_names.append(row['identity'].split('/')[-1].split('.')[0])
-                    face_locations.append((
-                        int(row['source_y']),
-                        int(row['source_x'] + row['source_w']),
-                        int(row['source_y'] + row['source_h']),
-                        int(row['source_x'])
-                    ))
-        
-        return face_locations, recognized_names
-    except Exception as e:
-        st.error(f"Face recognition error: {str(e)}")
-        return [], []
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    # Convert input to grayscale
+    gray_input = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
+    
+    # Compare with all registered faces
+    for face_file in os.listdir(KNOWN_FACES_DIR):
+        if face_file.endswith('.jpg'):
+            name = os.path.splitext(face_file)[0]
+            face_path = os.path.join(KNOWN_FACES_DIR, face_file)
+            registered_face = cv2.imread(face_path, cv2.IMREAD_GRAYSCALE)
+            
+            # Resize to same dimensions
+            registered_face = cv2.resize(registered_face, (gray_input.shape[1], gray_input.shape[0]))
+            
+            # Simple template matching
+            result = cv2.matchTemplate(gray_input, registered_face, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            
+            if max_val > TOLERANCE:
+                recognized_names.append(name)
+    
+    return recognized_names
 
 def mark_attendance(name):
     """Mark attendance in database"""
@@ -152,77 +135,32 @@ def get_attendance_stats():
     conn.close()
     return daily_stats, person_stats
 
-# Video transformer
-class FaceRecognitionTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.attendance_log = queue.Queue()
-        self.last_detection_time = {}
-        self.detection_interval = 10
-    
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        face_locations, recognized_names = recognize_face(img)
-        
-        for (top, right, bottom, left), name in zip(face_locations, recognized_names):
-            cv2.rectangle(img, (left, top), (right, bottom), (0, 255, 0), FRAME_THICKNESS)
-            cv2.putText(img, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 
-                      0.5, (255, 255, 255), FONT_THICKNESS)
-            
-            current_time = time.time()
-            if name != "Unknown" and (name not in self.last_detection_time or 
-                                     current_time - self.last_detection_time[name] > self.detection_interval):
-                mark_attendance(name)
-                self.attendance_log.put((name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                self.last_detection_time[name] = current_time
-        
-        return img
-
 # Streamlit UI
 st.set_page_config(page_title="Attendance System", layout="wide")
-st.title("Advanced Attendance Management System with Face Recognition")
+st.title("Attendance Management System")
 
 # Sidebar for navigation
 menu = st.sidebar.selectbox("Menu", ["Home", "Register New Face", "Attendance Records", "Analytics", "Settings"])
 
 if menu == "Home":
-    st.header("Real-time Attendance")
+    st.header("Attendance System")
     
-    col1, col2 = st.columns([2, 1])
+    uploaded_file = st.file_uploader("Upload an image to recognize faces", type=["jpg", "jpeg", "png"])
     
-    with col1:
-        st.subheader("Live Camera Feed")
-        ctx = webrtc_streamer(
-            key="example",
-            video_transformer_factory=FaceRecognitionTransformer,
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            media_stream_constraints={"video": True, "audio": False},
-        )
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        image_array = np.array(image)
         
-        if ctx.video_transformer:
-            st.write("### Recent Attendance Logs")
-            log_placeholder = st.empty()
-            
-            def update_log():
-                while True:
-                    try:
-                        name, timestamp = ctx.video_transformer.attendance_log.get_nowait()
-                        log_placeholder.write(f"{timestamp}: {name} marked present")
-                    except queue.Empty:
-                        time.sleep(0.1)
-            
-            threading.Thread(target=update_log, daemon=True).start()
-    
-    with col2:
-        st.subheader("Quick Stats")
-        daily_stats, person_stats = get_attendance_stats()
-        registered_faces = get_registered_faces()
+        st.image(image, caption="Uploaded Image", use_column_width=True)
         
-        st.metric("Total Registered Faces", len(registered_faces))
-        today_attendance = len(get_attendance_data()[get_attendance_data()['date'] == datetime.now().date().isoformat()])
-        st.metric("Today's Attendance", today_attendance)
-        
-        st.write("### Top Attendees")
-        st.table(person_stats.head(5))
+        if st.button("Recognize Faces"):
+            recognized_names = recognize_face(image_array)
+            if recognized_names:
+                st.success("Recognized faces: " + ", ".join(recognized_names))
+                for name in recognized_names:
+                    mark_attendance(name)
+            else:
+                st.warning("No recognized faces found")
 
 elif menu == "Register New Face":
     st.header("Register New Face")
@@ -302,40 +240,17 @@ elif menu == "Analytics":
             st.pyplot(fig)
         else:
             st.warning("No attendance data available")
-    
-    st.subheader("Attendance Heatmap")
-    df = get_attendance_data()
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['hour'] = df['timestamp'].dt.hour
-        df['day_of_week'] = df['timestamp'].dt.day_name()
-        
-        heatmap_data = df.pivot_table(index='day_of_week', columns='hour', 
-                                    values='name', aggfunc='count', fill_value=0)
-        
-        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        heatmap_data = heatmap_data.reindex(days_order)
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        sns.heatmap(heatmap_data, cmap="YlGnBu", ax=ax)
-        ax.set_title("Attendance by Day and Hour")
-        st.pyplot(fig)
-    else:
-        st.warning("No attendance data available")
 
 elif menu == "Settings":
     st.header("System Settings")
     
-    st.subheader("Face Recognition Parameters")
-    # Use session state to manage tolerance
-    if 'tolerance' not in st.session_state:
-        st.session_state.tolerance = TOLERANCE
-    
-    new_tolerance = st.slider("Recognition Tolerance (lower is stricter)", 
-                            0.0, 1.0, st.session_state.tolerance, 0.05)
+    st.subheader("Recognition Parameters")
+    new_tolerance = st.slider("Recognition Threshold (higher is stricter)", 
+                            0.0, 1.0, TOLERANCE, 0.05)
     
     if st.button("Save Settings"):
-        st.session_state.tolerance = new_tolerance
+        global TOLERANCE
+        TOLERANCE = new_tolerance
         st.success("Settings saved!")
     
     st.subheader("System Maintenance")
