@@ -6,3 +6,5 @@ python-dateutil
 matplotlib
 seaborn
 Pillow
+streamlit-webrtc
+av
