@@ -23,6 +23,10 @@ A **face recognition-based attendance system** developed as part of Microsoft's 
 3. **Demonstrate** end-to-end AI solution development
 4. **Showcase** Microsoft AI principles learned in training
 
+To get access as Admin
+Name:admin
+Password:admin123
+
 ## 🚀 How It Works
 ```mermaid
 graph TD
