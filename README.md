@@ -6,7 +6,7 @@
 
 A **face recognition-based attendance system** developed as part of Microsoft's Advanced AI Certification through EduNet Foundation.
 
-➡️ **Live Demo**: [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://excelerator-project-p9ql4spdtvhuuvmlfdsgef.streamlit.app/)
+➡️ **Live Demo**: [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://attendence-management-system-majnyve3vkzmpsh5gjncuq.streamlit.app/)
 
 ## ✨ Key Features
 | Feature | Description | Tech Used |
